@@ -9,7 +9,7 @@
 #include <libopencm3/stm32/timer.h>
 #include <libopencm3/stm32/usart.h>
 
-uint16_t buff[1024];
+uint16_t buff[2048];
 
 volatile int cnt = 0;
 
@@ -60,10 +60,36 @@ void rcc_clock_setup_in_hsi_out_56mhz(void)
 	rcc_ppre2_frequency = 56000000;
 }
 
-static void setup_adc(void)
+static void setup_adc(u32 adc)
+{
+	/* We configure everything for one single conversion. */
+	adc_disable_scan_mode(adc);
+	adc_set_continous_conversion_mode(adc);
+	// adc_disable_external_trigger_regular() is defective in libopencm3
+	ADC_CR2(adc) |= ADC_CR2_EXTTRIG | ADC_CR2_EXTSEL_SWSTART;
+	adc_set_right_aligned(adc);
+	adc_set_conversion_time_on_all_channels(adc, ADC_SMPR_SMP_1DOT5CYC);
+
+	adc_on(adc);
+
+	/* Wait for ADC starting up. */
+	int i;
+	for (i = 0; i < 800000; i++)    /* Wait a bit. */
+		__asm__("nop");
+
+	adc_reset_calibration(adc);
+	adc_calibration(adc);
+
+	uint8_t channel_array[16];
+	/* Select the channel we want to convert. */
+	channel_array[0] = 0;
+	adc_set_regular_sequence(adc, 1, channel_array);
+}
+
+static void setup_adc_dma(void)
 {
 	rcc_peripheral_enable_clock(&RCC_APB2ENR, 
-			RCC_APB2ENR_ADC1EN);
+			RCC_APB2ENR_ADC1EN | RCC_APB2ENR_ADC2EN);
 
 	/* ADC pin for AD8307 output */
 	gpio_set_mode(GPIOA, GPIO_MODE_INPUT,
@@ -75,38 +101,23 @@ static void setup_adc(void)
 
 	/* Make sure the ADC doesn't run during config. */
 	adc_off(ADC1);
+	adc_off(ADC2);
 
 	dma_channel_reset(DMA1, DMA_CHANNEL1);
 	dma_set_peripheral_address(DMA1, DMA_CHANNEL1, (u32) &ADC1_DR);
 	dma_set_memory_address(DMA1, DMA_CHANNEL1, (u32) &buff);
 	dma_set_priority(DMA1, DMA_CHANNEL1, DMA_CCR_PL_VERY_HIGH);
-	dma_set_peripheral_size(DMA1, DMA_CHANNEL1, DMA_CCR_PSIZE_16BIT);
-	dma_set_memory_size(DMA1, DMA_CHANNEL1, DMA_CCR_MSIZE_16BIT);
+	dma_set_peripheral_size(DMA1, DMA_CHANNEL1, DMA_CCR_PSIZE_32BIT);
+	dma_set_memory_size(DMA1, DMA_CHANNEL1, DMA_CCR_MSIZE_32BIT);
 	dma_enable_memory_increment_mode(DMA1, DMA_CHANNEL1);
 	dma_set_read_from_peripheral(DMA1, DMA_CHANNEL1);
 
-	/* We configure everything for one single conversion. */
-	adc_enable_scan_mode(ADC1);
-	adc_set_continous_conversion_mode(ADC1);
-	adc_disable_external_trigger_regular(ADC1);
-	adc_set_right_aligned(ADC1);
-	adc_set_conversion_time_on_all_channels(ADC1, ADC_SMPR_SMP_1DOT5CYC);
 	adc_enable_dma(ADC1);
 
-	adc_on(ADC1);
+	ADC1_CR1 |= ADC_CR1_DUALMOD_FIM;
 
-	/* Wait for ADC starting up. */
-	int i;
-	for (i = 0; i < 800000; i++)    /* Wait a bit. */
-		__asm__("nop");
-
-	adc_reset_calibration(ADC1);
-	adc_calibration(ADC1);
-
-	uint8_t channel_array[16];
-	/* Select the channel we want to convert. */
-	channel_array[0] = 0;
-	adc_set_regular_sequence(ADC1, 1, channel_array);
+	setup_adc(ADC1);
+	setup_adc(ADC2);
 }
 
 
@@ -145,17 +156,17 @@ static void setup(void)
 	/* Finally enable the USART. */
 	usart_enable(USART1);
 
-	setup_adc();
+	setup_adc_dma();
 }
 
 static void get_samples(void)
 {
 	const int nsamples = sizeof(buff)/sizeof(*buff);
 
-	dma_set_number_of_data(DMA1, DMA_CHANNEL1, sizeof(buff)/sizeof(*buff));
+	// nsamples/2 because we transfer two samples per request in dual mode
+	dma_set_number_of_data(DMA1, DMA_CHANNEL1, nsamples/2);
 	dma_enable_channel(DMA1, DMA_CHANNEL1);
 
-	adc_on(ADC1);
 	while(!(DMA_ISR(DMA1) & DMA_ISR_TCIF(DMA_CHANNEL1))) {}
 	DMA_IFCR(DMA1) = DMA_IFCR_CTCIF(DMA_CHANNEL1);
 
@@ -200,6 +211,9 @@ int main(void)
 {
 	setup();
 	printf("boot\n");
+
+	// trigger start of continuous conversion
+	ADC_CR2(ADC1) |= ADC_CR2_SWSTART;
 
 	while (1) {
 		get_samples();
