@@ -149,5 +149,5 @@ db(u) = 20*log10(u)
 GNUTERM = "wxt"
 i = {0.0, 1.0}
 GPFUN_db = "db(u) = 20*log10(u)"
-plot "./display.dat" using 1:(db($2/835)), db(abs(1/(i*x/42e6+1))) with lines
+plot "./measure_vs_freq_sncproto.dat" using 1:(db($2/835)), db(abs(1/(i*x/42e6+1))) with lines
 #    EOF
